@@ -11,8 +11,8 @@ import time
 # =========================================================
 # 1. 基础配置
 # =========================================================
-IMAGE_PATH = r"C:\Users\10761\Desktop\毕业设计\3.png"  # 替换为你需要检测的大图路径
-MODEL_PATH = r"G:\YOLO\ultralytics-8.3.163\runs\segment\train17\weights\best.pt"  # 替换为你的 YOLOv11Seg 权重
+IMAGE_PATH = r"C:\Users\10761\Desktop\part-00660-2127.jpg"  # 替换为你需要检测的大图路径
+MODEL_PATH = r"G:\YOLO\seed-counting\main-workshop\yolo11n-seg.pt"  # 替换为你的 YOLOv11Seg 权重
 OUTPUT_DIR = r"runs/detect/sahi_result"
 CONFIDENCE_THRESHOLD = 0.25
 

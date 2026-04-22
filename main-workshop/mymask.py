@@ -92,7 +92,48 @@ def run(model_path, image_path, tile_size=640, overlap=100, conf_thres=0.25, iou
     for idx, (name, count) in enumerate(class_counts.items()):
         cv2.putText(img, f"{name}: {count}", (30, 90 + idx * 35), 2, 0.7, (0, 255, 0), 2)
 
-    return img, len(keep_idx)
+    return img, len(keep_idx), class_counts
+
+
+def run_direct(model_path, image_path, conf_thres=0.25, iou_thres=0.45):
+    """直接推理（不切片），适合大目标，返回 (annotated_bgr, total_count)"""
+    model = YOLO(model_path)
+    img = cv2.imread(image_path)
+    res = model.predict(img, conf=conf_thres, iou=iou_thres, verbose=False, task='segment')[0]
+
+    if res.masks is None:
+        return img, 0, {}
+
+    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (0, 255, 255), (255, 0, 255)]
+    h, w = img.shape[:2]
+    class_counts = {}
+
+    for count_id, i in enumerate(range(len(res.masks.data)), start=1):
+        cls_id = int(res.boxes.cls[i].item())
+        cls_name = model.names[cls_id]
+        class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+        color = colors[cls_id % len(colors)]
+
+        m = res.masks.data[i].cpu().numpy()
+        m = cv2.resize(m, (w, h)) > 0.5
+        img[m] = (img[m] * 0.5 + np.array(color) * 0.5).astype(np.uint8)
+
+        M = cv2.moments(m.astype(np.uint8))
+        if M["m00"] != 0:
+            cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+        else:
+            box = res.boxes.xyxy[i].cpu().numpy()
+            cx, cy = int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2)
+
+        cv2.putText(img, str(count_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+        cv2.putText(img, str(count_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+    total = len(res.masks.data)
+    overlay = img.copy()
+    cv2.rectangle(overlay, (10, 10), (320, 70), (0, 0, 0), -1)
+    img = cv2.addWeighted(overlay, 0.6, img, 0.4, 0)
+    cv2.putText(img, f"TOTAL: {total}", (25, 50), 2, 0.9, (255, 255, 255), 2)
+    return img, total, class_counts
 
 
 if __name__ == "__main__":

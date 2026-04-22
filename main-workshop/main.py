@@ -3,28 +3,37 @@ import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QGraphicsView,
                              QGraphicsScene, QGraphicsPixmapItem, QFileDialog,
-                             QLabel, QGroupBox, QProgressBar, QStatusBar, QComboBox)
+                             QLabel, QGroupBox, QProgressBar, QStatusBar, QComboBox,
+                             QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt6.QtGui import QPixmap, QTransform, QFont, QImage
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
 
 
 class InferenceThread(QThread):
-    finished = pyqtSignal(object, int)
+    finished = pyqtSignal(object, int, dict)
     error = pyqtSignal(str)
 
-    def __init__(self, model_path, image_path):
+    def __init__(self, model_path, image_path, mode='sliced'):
         super().__init__()
         self.model_path = model_path
         self.image_path = image_path
+        self.mode = mode
 
     def run(self):
         try:
-            workshop = os.path.abspath(os.path.dirname(__file__))
+            if getattr(sys, 'frozen', False):
+                workshop = sys._MEIPASS
+            else:
+                workshop = os.path.abspath(os.path.dirname(__file__))
             if workshop not in sys.path:
                 sys.path.insert(0, workshop)
-            from mymask import run as mask_run
-            annotated, count = mask_run(self.model_path, self.image_path)
-            self.finished.emit(annotated, count)
+            if self.mode == 'direct':
+                from mymask import run_direct
+                annotated, count, class_counts = run_direct(self.model_path, self.image_path)
+            else:
+                from mymask import run as mask_run
+                annotated, count, class_counts = mask_run(self.model_path, self.image_path)
+            self.finished.emit(annotated, count, class_counts)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -72,6 +81,10 @@ class SeedCountingUI(QMainWindow):
         algo_group = QGroupBox("算法控制")
         algo_layout = QVBoxLayout()
         algo_layout.setSpacing(10)
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItem("切片推理（小目标）", "sliced")
+        self.combo_mode.addItem("直接推理（大目标）", "direct")
+        algo_layout.addWidget(self.combo_mode)
         self.btn_run = QPushButton("启动种子计数")
         self.btn_run.setEnabled(False)
         self.progress = QProgressBar()
@@ -86,6 +99,19 @@ class SeedCountingUI(QMainWindow):
         algo_layout.addWidget(self.btn_run)
         algo_layout.addWidget(self.progress)
         algo_layout.addWidget(self.lbl_result)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["标签", "数量"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(1, 60)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setFixedHeight(160)
+        self.table.setObjectName("resultTable")
+        algo_layout.addWidget(self.table)
         algo_group.setLayout(algo_layout)
 
         # 图像工具
@@ -149,18 +175,18 @@ class SeedCountingUI(QMainWindow):
     def apply_styles(self):
         self.setStyleSheet("""
             QMainWindow, QWidget {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
+                background-color: #f5f5f5;
+                color: #212121;
             }
             QWidget#sidebar {
-                background-color: #2a2a3e;
-                border-right: 1px solid #44475a;
+                background-color: #ffffff;
+                border-right: 1px solid #e0e0e0;
             }
             QGroupBox {
                 font-size: 13px;
                 font-weight: bold;
-                color: #a6adc8;
-                border: 1px solid #44475a;
+                color: #555555;
+                border: 1px solid #e0e0e0;
                 border-radius: 8px;
                 margin-top: 12px;
                 padding-top: 16px;
@@ -171,7 +197,7 @@ class SeedCountingUI(QMainWindow):
                 padding: 0 4px;
             }
             QPushButton {
-                background-color: #5865f2;
+                background-color: #1976d2;
                 color: #ffffff;
                 border: none;
                 border-radius: 6px;
@@ -179,75 +205,106 @@ class SeedCountingUI(QMainWindow):
                 font-size: 13px;
                 font-weight: bold;
             }
-            QPushButton:hover { background-color: #4752c4; }
-            QPushButton:pressed { background-color: #3c45a5; }
-            QPushButton:disabled { background-color: #44475a; color: #6c7086; }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+            QPushButton:disabled { background-color: #bdbdbd; color: #757575; }
             QPushButton#secondaryBtn {
-                background-color: #313244;
+                background-color: #eeeeee;
+                color: #424242;
                 font-size: 12px;
                 padding: 7px 14px;
             }
-            QPushButton#secondaryBtn:hover { background-color: #45475a; }
+            QPushButton#secondaryBtn:hover { background-color: #e0e0e0; }
             QComboBox {
-                background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #44475a;
+                background-color: #ffffff;
+                color: #212121;
+                border: 1px solid #bdbdbd;
                 border-radius: 6px;
                 padding: 7px 10px;
                 font-size: 13px;
             }
-            QComboBox:hover { border-color: #5865f2; }
+            QComboBox:hover { border-color: #1976d2; }
             QComboBox::drop-down { border: none; width: 24px; }
             QComboBox QAbstractItemView {
-                background-color: #313244;
-                color: #cdd6f4;
-                selection-background-color: #5865f2;
-                border: 1px solid #44475a;
+                background-color: #ffffff;
+                color: #212121;
+                selection-background-color: #1976d2;
+                selection-color: #ffffff;
+                border: 1px solid #bdbdbd;
             }
             QLabel#subLabel {
                 font-size: 11px;
-                color: #6c7086;
+                color: #9e9e9e;
             }
             QLabel#resultLabel {
-                color: #a6e3a1;
+                color: #2e7d32;
                 padding: 6px 0;
             }
             QProgressBar {
-                background-color: #44475a;
+                background-color: #e0e0e0;
                 border: none;
                 border-radius: 3px;
             }
             QProgressBar::chunk {
-                background-color: #5865f2;
+                background-color: #1976d2;
                 border-radius: 3px;
             }
             QGraphicsView#imageView {
-                background-color: #11111b;
+                background-color: #e8e8e8;
                 border: none;
             }
             QStatusBar#statusBar {
-                background-color: #181825;
-                border-top: 1px solid #44475a;
-                color: #6c7086;
+                background-color: #ffffff;
+                border-top: 1px solid #e0e0e0;
+                color: #757575;
                 font-size: 12px;
             }
             QLabel#statusLabel {
-                color: #6c7086;
+                color: #757575;
                 font-size: 12px;
                 padding: 0 8px;
+            }
+            QTableWidget#resultTable {
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 6px;
+                gridline-color: #f0f0f0;
+                font-size: 12px;
+            }
+            QTableWidget#resultTable QHeaderView::section {
+                background-color: #1976d2;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 4px;
+                border: none;
+            }
+            QTableWidget#resultTable::item {
+                padding: 4px 8px;
+            }
+            QTableWidget#resultTable::item:alternate {
+                background-color: #f5f9ff;
             }
         """)
 
     def eventFilter(self, obj, event):
-        if obj is self.view.viewport() and event.type() == QEvent.Type.MouseMove:
-            if self.current_pixmap:
-                scene_pos = self.view.mapToScene(event.pos())
-                px = self.current_pixmap.pixmap()
-                x, y = int(scene_pos.x()), int(scene_pos.y())
-                if 0 <= x < px.width() and 0 <= y < px.height():
-                    self.status_coord.setText(f"X: {x}  Y: {y}")
-                else:
-                    self.status_coord.setText("X: --  Y: --")
+        if obj is self.view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                if self.current_pixmap:
+                    scene_pos = self.view.mapToScene(event.pos())
+                    px = self.current_pixmap.pixmap()
+                    x, y = int(scene_pos.x()), int(scene_pos.y())
+                    if 0 <= x < px.width() and 0 <= y < px.height():
+                        self.status_coord.setText(f"X: {x}  Y: {y}")
+                    else:
+                        self.status_coord.setText("X: --  Y: --")
+            elif event.type() == QEvent.Type.Wheel:
+                factor = 1.1 if event.angleDelta().y() > 0 else 0.9
+                new_zoom = self._zoom_level * factor
+                if 0.05 <= new_zoom <= 20:
+                    self._zoom_level = new_zoom
+                    self.view.scale(factor, factor)
+                    self.status_zoom.setText(f"缩放: {self._zoom_level * 100:.0f}%")
+                return True
         return super().eventFilter(obj, event)
 
     def _refresh_models(self):
@@ -282,15 +339,18 @@ class SeedCountingUI(QMainWindow):
         self.btn_run.setEnabled(bool(self.model_path and self.image_path))
 
     def run_inference(self):
+        if self._thread and self._thread.isRunning():
+            return
         self.btn_run.setEnabled(False)
         self.progress.setVisible(True)
         self.lbl_result.setText("检测中，请稍候...")
-        self._thread = InferenceThread(self.model_path, self.image_path)
+        mode = self.combo_mode.currentData()
+        self._thread = InferenceThread(self.model_path, self.image_path, mode)
         self._thread.finished.connect(self._on_inference_done)
         self._thread.error.connect(self._on_inference_error)
         self._thread.start()
 
-    def _on_inference_done(self, annotated_bgr, count):
+    def _on_inference_done(self, annotated_bgr, count, class_counts):
         h, w, ch = annotated_bgr.shape
         rgb = annotated_bgr[:, :, ::-1].copy()
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -300,6 +360,15 @@ class SeedCountingUI(QMainWindow):
         self.status_file.setText(f"{os.path.basename(self.image_path)}  {px.width()} × {px.height()}  [检测完成]")
         self.progress.setVisible(False)
         self.btn_run.setEnabled(True)
+
+        self.table.setRowCount(0)
+        for label, cnt in class_counts.items():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(label))
+            item = QTableWidgetItem(str(cnt))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 1, item)
 
     def _on_inference_error(self, msg):
         self.lbl_result.setText(f"错误: {msg}")
@@ -333,14 +402,6 @@ class SeedCountingUI(QMainWindow):
             new_pixmap = self.current_pixmap.pixmap().transformed(transform)
             self.current_pixmap.setPixmap(new_pixmap)
             self.view.fitInView(self.current_pixmap, Qt.AspectRatioMode.KeepAspectRatio)
-
-    def wheelEvent(self, event):
-        factor = 1.1 if event.angleDelta().y() > 0 else 0.9
-        new_zoom = self._zoom_level * factor
-        if 0.05 <= new_zoom <= 20:
-            self._zoom_level = new_zoom
-            self.view.scale(factor, factor)
-            self.status_zoom.setText(f"缩放: {self._zoom_level * 100:.0f}%")
 
 
 if __name__ == "__main__":
