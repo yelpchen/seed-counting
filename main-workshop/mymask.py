@@ -45,8 +45,164 @@ def _manual_sliced_predict(img, model, tile_size, overlap, conf_thres, iou_thres
     return keep, all_boxes, all_scores, all_cls, all_masks
 
 
-def run(model_path, image_path, tile_size=640, overlap=100, conf_thres=0.25, iou_thres=0.45):
-    """切片推理 + 掩码渲染，返回 (annotated_bgr, total_count)"""
+def _seam_positions(length, stride):
+    if stride <= 0:
+        return []
+    return [p for p in range(stride, length, stride)]
+
+
+def _mask_centroid(mask, x1, y1, box):
+    M = cv2.moments(mask.astype(np.uint8))
+    if M["m00"] != 0:
+        return int(M["m10"] / M["m00"]) + x1, int(M["m01"] / M["m00"]) + y1
+    return int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2)
+
+
+def _touching_seams(mask, roi, seam_xs, seam_ys, seam_band):
+    y1, y2, x1, x2 = roi
+    seams = set()
+
+    for sx in seam_xs:
+        if sx < x1 - seam_band or sx > x2 + seam_band:
+            continue
+        lx0 = max(0, sx - seam_band - x1)
+        lx1 = min(mask.shape[1], sx + seam_band + 1 - x1)
+        if lx0 < lx1 and mask[:, lx0:lx1].any():
+            seams.add(("v", sx))
+
+    for sy in seam_ys:
+        if sy < y1 - seam_band or sy > y2 + seam_band:
+            continue
+        ly0 = max(0, sy - seam_band - y1)
+        ly1 = min(mask.shape[0], sy + seam_band + 1 - y1)
+        if ly0 < ly1 and mask[ly0:ly1, :].any():
+            seams.add(("h", sy))
+
+    return seams
+
+
+def _pair_metrics_on_shared_seams(inst_a, inst_b, shared_seams, seam_band):
+    ay1, ay2, ax1, ax2 = inst_a["roi"]
+    by1, by2, bx1, bx2 = inst_b["roi"]
+
+    ox1, oy1 = max(ax1, bx1), max(ay1, by1)
+    ox2, oy2 = min(ax2, bx2), min(ay2, by2)
+    if ox1 >= ox2 or oy1 >= oy2:
+        return 0.0, 0.0
+
+    a_sub = inst_a["mask"][oy1 - ay1:oy2 - ay1, ox1 - ax1:ox2 - ax1]
+    b_sub = inst_b["mask"][oy1 - by1:oy2 - by1, ox1 - bx1:ox2 - bx1]
+
+    band = np.zeros_like(a_sub, dtype=bool)
+    xs = np.arange(ox1, ox2)
+    ys = np.arange(oy1, oy2)
+
+    for axis, pos in shared_seams:
+        if axis == "v":
+            cols = np.abs(xs - pos) <= seam_band
+            if np.any(cols):
+                band[:, cols] = True
+        else:
+            rows = np.abs(ys - pos) <= seam_band
+            if np.any(rows):
+                band[rows, :] = True
+
+    if not band.any():
+        return 0.0, 0.0
+
+    a_band = a_sub & band
+    b_band = b_sub & band
+
+    inter = np.count_nonzero(a_band & b_band)
+    union = np.count_nonzero(a_band | b_band)
+    band_iou = inter / union if union > 0 else 0.0
+
+    kernel = np.ones((3, 3), np.uint8)
+    a_edge = cv2.morphologyEx(a_band.astype(np.uint8), cv2.MORPH_GRADIENT, kernel) > 0
+    b_edge = cv2.morphologyEx(b_band.astype(np.uint8), cv2.MORPH_GRADIENT, kernel) > 0
+    if not a_edge.any() or not b_edge.any():
+        return band_iou, 0.0
+
+    a_edge_d = cv2.dilate(a_edge.astype(np.uint8), kernel, iterations=1) > 0
+    touch = np.count_nonzero(a_edge_d & b_edge)
+    denom = min(np.count_nonzero(a_edge), np.count_nonzero(b_edge))
+    contour_touch = touch / max(1, denom)
+
+    return band_iou, contour_touch
+
+
+def _boxes_close(box_a, box_b, pad):
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    return not (ax2 + pad < bx1 or bx2 + pad < ax1 or ay2 + pad < by1 or by2 + pad < ay1)
+
+
+def _merge_instances(instances, merge_pairs):
+    parent = list(range(len(instances)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i, j in merge_pairs:
+        union(i, j)
+
+    groups = {}
+    for idx in range(len(instances)):
+        root = find(idx)
+        groups.setdefault(root, []).append(idx)
+
+    merged = []
+    for root in sorted(groups, key=lambda r: min(groups[r])):
+        members = groups[root]
+        y1 = min(instances[m]["roi"][0] for m in members)
+        y2 = max(instances[m]["roi"][1] for m in members)
+        x1 = min(instances[m]["roi"][2] for m in members)
+        x2 = max(instances[m]["roi"][3] for m in members)
+
+        merged_mask = np.zeros((y2 - y1, x2 - x1), dtype=bool)
+        cls_votes = {}
+        best_member = members[0]
+
+        for m in members:
+            inst = instances[m]
+            iy1, iy2, ix1, ix2 = inst["roi"]
+            merged_mask[iy1 - y1:iy2 - y1, ix1 - x1:ix2 - x1] |= inst["mask"]
+            cls_votes[inst["cls_id"]] = cls_votes.get(inst["cls_id"], 0) + 1
+            if inst["score"] > instances[best_member]["score"]:
+                best_member = m
+
+        if not merged_mask.any():
+            continue
+
+        cls_id = max(cls_votes.items(), key=lambda kv: kv[1])[0]
+        box = np.array([x1, y1, x2, y2], dtype=np.float32)
+        center = _mask_centroid(merged_mask, x1, y1, box)
+
+        merged.append({
+            "cls_id": cls_id,
+            "score": instances[best_member]["score"],
+            "box": box,
+            "roi": (y1, y2, x1, x2),
+            "mask": merged_mask,
+            "center": center,
+        })
+
+    return merged
+
+
+
+def run(model_path, image_path, tile_size=640, overlap=100, conf_thres=0.25, iou_thres=0.45,
+        enable_seam_merge=True, seam_band=None, seam_iou_thres=0.15,
+        contour_touch_thres=0.2, strong_seam_iou_thres=0.28, centroid_dist_thres=None):
+    """切片推理 + 掩码渲染，返回 (annotated_bgr, total_count, class_counts)"""
     model = YOLO(model_path)
     img = cv2.imread(image_path)
 
@@ -55,44 +211,95 @@ def run(model_path, image_path, tile_size=640, overlap=100, conf_thres=0.25, iou
     )
 
     if len(keep_idx) == 0:
-        return img, 0
+        return img, 0, {}
+
+    h, w = img.shape[:2]
+    stride = tile_size - overlap
+    seam_band = seam_band if seam_band is not None else max(2, overlap // 8)
+    centroid_dist_thres = centroid_dist_thres if centroid_dist_thres is not None else overlap
+    seam_xs = _seam_positions(w, stride)
+    seam_ys = _seam_positions(h, stride)
+
+    instances = []
+    for i in keep_idx:
+        box = all_boxes[i]
+        cls_id = int(all_cls[i])
+        score = float(all_scores[i])
+        m_data, roi = all_masks[i]
+        y1, y2, x1, x2 = roi
+        center = _mask_centroid(m_data, x1, y1, box)
+        seams = _touching_seams(m_data, roi, seam_xs, seam_ys, seam_band)
+
+        instances.append({
+            "src_idx": int(i),
+            "box": box,
+            "cls_id": cls_id,
+            "score": score,
+            "roi": roi,
+            "mask": m_data,
+            "center": center,
+            "seams": seams,
+        })
+
+    if enable_seam_merge and len(instances) > 1:
+        merge_pairs = []
+        pad = max(4, overlap)
+        for i in range(len(instances)):
+            a = instances[i]
+            if not a["seams"]:
+                continue
+            for j in range(i + 1, len(instances)):
+                b = instances[j]
+                if a["cls_id"] != b["cls_id"]:
+                    continue
+                if not b["seams"]:
+                    continue
+                shared_seams = a["seams"] & b["seams"]
+                if not shared_seams:
+                    continue
+                if not _boxes_close(a["box"], b["box"], pad=pad):
+                    continue
+
+                dx = a["center"][0] - b["center"][0]
+                dy = a["center"][1] - b["center"][1]
+                if dx * dx + dy * dy > centroid_dist_thres * centroid_dist_thres:
+                    continue
+
+                band_iou, contour_touch = _pair_metrics_on_shared_seams(a, b, shared_seams, seam_band)
+                if (band_iou >= seam_iou_thres and contour_touch >= contour_touch_thres) or band_iou >= strong_seam_iou_thres:
+                    merge_pairs.append((i, j))
+
+        instances = _merge_instances(instances, merge_pairs)
 
     colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (0, 255, 255), (255, 0, 255)]
     class_counts = {}
 
-    for count_id, i in enumerate(keep_idx, start=1):
-        box = all_boxes[i]
-        cls_id = int(all_cls[i])
+    for count_id, inst in enumerate(instances, start=1):
+        cls_id = inst["cls_id"]
         cls_name = model.names[cls_id]
         class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
         color = colors[cls_id % len(colors)]
 
-        m_data, (y1, y2, x1, x2) = all_masks[i]
+        y1, y2, x1, x2 = inst["roi"]
+        m_data = inst["mask"]
         roi = img[y1:y2, x1:x2]
         roi[m_data] = (roi[m_data] * 0.5 + np.array(color) * 0.5).astype(np.uint8)
         img[y1:y2, x1:x2] = roi
 
-        M = cv2.moments(m_data.astype(np.uint8))
-        if M["m00"] != 0:
-            cx = int(M["m10"] / M["m00"]) + x1
-            cy = int(M["m01"] / M["m00"]) + y1
-        else:
-            cx = int((box[0] + box[2]) / 2)
-            cy = int((box[1] + box[3]) / 2)
-
+        cx, cy = inst["center"]
         cv2.putText(img, str(count_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
         cv2.putText(img, str(count_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-    # 左上角看板
+    total = len(instances)
     overlay = img.copy()
     box_h = 70 + len(class_counts) * 35
     cv2.rectangle(overlay, (10, 10), (320, box_h), (0, 0, 0), -1)
     img = cv2.addWeighted(overlay, 0.6, img, 0.4, 0)
-    cv2.putText(img, f"TOTAL: {len(keep_idx)}", (25, 50), 2, 0.9, (255, 255, 255), 2)
+    cv2.putText(img, f"TOTAL: {total}", (25, 50), 2, 0.9, (255, 255, 255), 2)
     for idx, (name, count) in enumerate(class_counts.items()):
         cv2.putText(img, f"{name}: {count}", (30, 90 + idx * 35), 2, 0.7, (0, 255, 0), 2)
 
-    return img, len(keep_idx), class_counts
+    return img, total, class_counts
 
 
 def run_direct(model_path, image_path, conf_thres=0.25, iou_thres=0.45):
@@ -141,7 +348,7 @@ if __name__ == "__main__":
     IMAGE_PATH = r"C:\Users\10761\Desktop\毕业设计\3.png"
     OUTPUT_DIR = "runs/yolo11_manual_output"
 
-    result_img, total = run(MODEL_PATH, IMAGE_PATH)
+    result_img, total, class_counts = run(MODEL_PATH, IMAGE_PATH)
     print(f"检测到 {total} 粒种子")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)

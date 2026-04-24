@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsScene, QGraphicsPixmapItem, QFileDialog,
                              QLabel, QGroupBox, QProgressBar, QStatusBar, QComboBox,
                              QTableWidget, QTableWidgetItem, QHeaderView)
-from PyQt6.QtGui import QPixmap, QTransform, QFont, QImage
+from PyQt6.QtGui import QPixmap, QTransform, QFont, QImage, QIcon
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
 
 
@@ -43,6 +43,10 @@ class SeedCountingUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("种子计数智能分析系统 - YOLOv11-seg")
         self.resize(1400, 900)
+
+        icon_path = os.path.join(os.path.dirname(__file__), 'icon', 'favicon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.current_pixmap = None
         self.model_path = None

@@ -23,7 +23,7 @@ class InferenceThread(QThread):
             if workshop not in sys.path:
                 sys.path.insert(0, workshop)
             from mymask import run as mask_run
-            annotated, count = mask_run(self.model_path, self.image_path)
+            annotated, count, _class_counts = mask_run(self.model_path, self.image_path)
             self.finished.emit(annotated, count)
         except Exception as e:
             self.error.emit(str(e))
