@@ -44,7 +44,12 @@ class SeedCountingUI(QMainWindow):
         self.setWindowTitle("种子计数智能分析系统 - YOLOv11-seg")
         self.resize(1400, 900)
 
-        icon_path = os.path.join(os.path.dirname(__file__), 'icon', 'favicon.ico')
+        if getattr(sys, 'frozen', False):
+            base_dir = sys._MEIPASS
+        else:
+            base_dir = os.path.abspath(os.path.dirname(__file__))
+
+        icon_path = os.path.join(base_dir, 'icon', 'favicon.ico')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 

@@ -1,30 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs
+
 block_cipher = None
+
+hiddenimports = [
+    'mymask',
+    'cv2',
+    'numpy',
+    'torch',
+    'torchvision',
+    'torchvision.ops',
+    'PyQt6.sip',
+] + collect_submodules('ultralytics') + collect_submodules('torchvision')
+
+binaries = []
+for pkg in ('torch', 'torchvision'):
+    try:
+        binaries += collect_dynamic_libs(pkg)
+    except Exception:
+        pass
+
+datas = [
+    ('main-workshop/ultralytics', 'ultralytics'),
+    ('main-workshop/models', 'models'),
+    ('main-workshop/icon', 'icon'),
+]
 
 a = Analysis(
     ['main-workshop/main.py'],
     pathex=['main-workshop'],
-    binaries=[],
-    datas=[
-        ('main-workshop/mymask.py', '.'),
-        ('main-workshop/ultralytics', 'ultralytics'),
-        ('main-workshop/models', 'models'),
-    ],
-    hiddenimports=[
-        'mymask',
-        'cv2',
-        'numpy',
-        'torch',
-        'torchvision',
-        'torchvision.ops',
-        'ultralytics',
-        'ultralytics.engine.model',
-        'ultralytics.models.yolo',
-        'ultralytics.nn.tasks',
-        'ultralytics.utils',
-        'ultralytics.utils.ops',
-    ],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
@@ -46,6 +54,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon='main-workshop/icon/favicon.ico',
 )
 
 coll = COLLECT(
